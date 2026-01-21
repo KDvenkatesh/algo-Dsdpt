@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, ReactNode } from 'react';
 import { Gamepad2, Coins, DollarSign, Wallet, Star, Swords, ShoppingBag, Settings, RefreshCw, Send, X, AlertTriangle, Home as HomeIcon, User, Layers, Check, QrCode, Smartphone } from 'lucide-react';
-import QRCode from 'qrcode.react' as any;
+import QRCode from 'qrcode';
+import { PeraWalletConnect } from '@perawallet/connect';
 
 // --- CONSTANTS AND MOCK DATA ---
 const INITIAL_HUB_STATE = {
@@ -25,6 +26,9 @@ const formatAlgo = (microAlgos: number): string => (microAlgos / 1000000).toFixe
 
 // Helper to format a number with commas
 const formatNumber = (num: number): string => num.toLocaleString();
+
+// --- PERA WALLET SETUP ---
+const peraWallet = new PeraWalletConnect();
 
 // --- COMPONENTS ---
 
@@ -87,6 +91,30 @@ const StatCard = ({ title, value, icon: Icon, unit = "", color = "text-purple-40
     </div>
 );
 
+/**
+ * QR Code Component
+ */
+const QRCodeDisplay = ({ value, size = 256 }: any) => {
+    const [qrDataUrl, setQrDataUrl] = useState<string>('');
+
+    useEffect(() => {
+        QRCode.toDataURL(value, {
+            width: size,
+            margin: 1,
+            color: { dark: '#000000', light: '#FFFFFF' },
+            errorCorrectionLevel: 'H',
+        })
+            .then((url: string) => setQrDataUrl(url))
+            .catch((err: any) => console.error('QR Code generation error:', err));
+    }, [value, size]);
+
+    if (!qrDataUrl) {
+        return <div className="bg-gray-300 rounded-lg" style={{ width: size, height: size }} />;
+    }
+
+    return <img src={qrDataUrl} alt="QR Code" className="rounded-lg" />;
+};
+
 // --- NAVIGATION BAR ---
 
 const Navigation = ({ activePage, setActivePage, isAdmin }: any) => (
@@ -148,42 +176,92 @@ const HomePage = ({ setActivePage }: any) => {
     const [walletConnected, setWalletConnected] = useState(false);
     const [walletAddress, setWalletAddress] = useState('');
     const [showMobileQR, setShowMobileQR] = useState(false);
-    const [sessionId] = useState(Math.random().toString(36).substring(7));
+    const [isConnecting, setIsConnecting] = useState(false);
 
-    const handleConnectPera = async () => {
-        try {
-            // Check if Pera wallet is available
-            if (window.algorand) {
-                const accounts = await window.algorand.connect();
+    // Check if wallet is already connected on mount
+    useEffect(() => {
+        const checkConnection = async () => {
+            try {
+                const accounts = await peraWallet.reconnectSession();
                 if (accounts && accounts.length > 0) {
                     setWalletAddress(accounts[0]);
                     setWalletConnected(true);
-                    // Auto-navigate to dashboard after connection
-                    setTimeout(() => setActivePage(PAGES.DASHBOARD), 500);
                 }
-            } else {
-                setShowMobileQR(true);
+            } catch (error) {
+                console.log('No previous wallet session found');
+            }
+        };
+
+        checkConnection();
+
+        // Subscribe to connect event
+        peraWallet.connector?.on('connect', (accounts: string[]) => {
+            console.log('Wallet connected:', accounts);
+            if (accounts && accounts.length > 0) {
+                setWalletAddress(accounts[0]);
+                setWalletConnected(true);
+                setShowMobileQR(false);
+                // Redirect to dashboard after connection
+                setTimeout(() => setActivePage(PAGES.DASHBOARD), 500);
+            }
+        });
+
+        // Subscribe to disconnect event
+        peraWallet.connector?.on('disconnect', () => {
+            console.log('Wallet disconnected');
+            setWalletConnected(false);
+            setWalletAddress('');
+        });
+
+        return () => {
+            // Cleanup listeners
+            peraWallet.connector?.off('connect');
+            peraWallet.connector?.off('disconnect');
+        };
+    }, []);
+
+    const handleConnectPera = async () => {
+        setIsConnecting(true);
+        try {
+            const accounts = await peraWallet.connect();
+            if (accounts && accounts.length > 0) {
+                setWalletAddress(accounts[0]);
+                setWalletConnected(true);
+                setShowMobileQR(false);
+                // Auto-navigate to dashboard after connection
+                setTimeout(() => setActivePage(PAGES.DASHBOARD), 500);
             }
         } catch (error) {
             console.error('Error connecting to Pera Wallet:', error);
+            // If connection fails, show QR code option
             setShowMobileQR(true);
+        } finally {
+            setIsConnecting(false);
+        }
+    };
+
+    const handleShowMobileQR = async () => {
+        setIsConnecting(true);
+        try {
+            // Initiate connection to generate URI
+            await peraWallet.connect();
+        } catch (error) {
+            console.log('QR code displayed, waiting for scan...');
+        } finally {
+            setShowMobileQR(true);
+            setIsConnecting(false);
         }
     };
 
     const handleDisconnect = async () => {
         try {
-            if (window.algorand) {
-                await window.algorand.disconnect();
-            }
+            await peraWallet.disconnect();
             setWalletConnected(false);
             setWalletAddress('');
         } catch (error) {
             console.error('Error disconnecting:', error);
         }
     };
-
-    // Create a deep link for Pera Wallet mobile
-    const peraDeepLink = `algorand://wallet/connect?sessionId=${sessionId}`;
 
     return (
         <div className="min-h-[calc(100vh-6rem)] flex flex-col items-center justify-center p-4 pt-16 relative overflow-hidden">
@@ -246,12 +324,13 @@ const HomePage = ({ setActivePage }: any) => {
                             </p>
                             
                             <div className="bg-white p-6 rounded-xl flex justify-center mb-6">
-                                <QRCode
-                                    value={peraDeepLink}
-                                    size={256}
-                                    level="H"
-                                    includeMargin={true}
-                                />
+                                {peraWallet.connector?.uri ? (
+                                    <QRCodeDisplay value={peraWallet.connector.uri} size={256} />
+                                ) : (
+                                    <div className="w-64 h-64 bg-gray-300 rounded-lg flex items-center justify-center">
+                                        <p className="text-gray-600">Generating QR code...</p>
+                                    </div>
+                                )}
                             </div>
 
                             <p className="text-gray-300 text-sm mb-6">
@@ -274,18 +353,20 @@ const HomePage = ({ setActivePage }: any) => {
                             <div className="space-y-4">
                                 <button
                                     onClick={handleConnectPera}
-                                    className="w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white font-bold rounded-xl shadow-lg hover:from-blue-700 hover:to-blue-800 transition duration-300 transform hover:scale-105 active:scale-95 flex items-center justify-center space-x-2"
+                                    disabled={isConnecting}
+                                    className="w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white font-bold rounded-xl shadow-lg hover:from-blue-700 hover:to-blue-800 transition duration-300 transform hover:scale-105 active:scale-95 flex items-center justify-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
                                     <Wallet className="w-6 h-6" />
-                                    <span>Connect with Pera Wallet</span>
+                                    <span>{isConnecting ? 'Connecting...' : 'Connect with Pera Wallet'}</span>
                                 </button>
 
                                 <button
-                                    onClick={() => setShowMobileQR(true)}
-                                    className="w-full px-6 py-3 bg-gradient-to-r from-purple-600 to-purple-700 text-white font-bold rounded-xl shadow-lg hover:from-purple-700 hover:to-purple-800 transition duration-300 transform hover:scale-105 active:scale-95 flex items-center justify-center space-x-2"
+                                    onClick={handleShowMobileQR}
+                                    disabled={isConnecting}
+                                    className="w-full px-6 py-3 bg-gradient-to-r from-purple-600 to-purple-700 text-white font-bold rounded-xl shadow-lg hover:from-purple-700 hover:to-purple-800 transition duration-300 transform hover:scale-105 active:scale-95 flex items-center justify-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
                                     <Smartphone className="w-6 h-6" />
-                                    <span>Connect with Mobile App (QR)</span>
+                                    <span>{isConnecting ? 'Generating QR...' : 'Connect with Mobile App (QR)'}</span>
                                 </button>
 
                                 <p className="text-gray-400 text-sm mt-6">
